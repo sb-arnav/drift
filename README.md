@@ -26,7 +26,10 @@ drift · 9 repos
 - `D<N>` — dirty file count
 - `↑<N>` / `↓<N>` — ahead/behind upstream
 - `no-upstream` — branch tracks nothing
-- `stalled` — `>= --stale-days` since last commit AND dirty (worth attention)
+- `no-commits` — repo initialized but has no commits yet
+- `stalled` — dirty **and** untouched (no commit *or* edit) for `>= --stale-days`
+
+A detached HEAD shows as `detached@<sha>` in the branch column.
 
 ## Use
 
@@ -39,7 +42,7 @@ drift --stale-days 7             # tighter stall threshold
 drift --json | jq                # machine-readable
 ```
 
-Exit code: `1` if any repo is dirty above `--dirty-warn` (default 1) or older than `--stale-days` (default 14). `0` otherwise.
+Exit code: `1` if any repo needs attention — dirty above `--dirty-warn` (default 1) or `stalled`. `0` otherwise. A clean repo that's merely old (a finished, shipped project) does **not** fail.
 
 ## Install
 
@@ -52,9 +55,9 @@ Stdlib only. Python 3.10+.
 
 ## Why not just `gita` / `mu-repo` / `myrepos`?
 
-- Self-contained single file. No multi-step setup.
-- Looks at working-tree mtime too, not just commits — surfaces "I edited but didn't commit" decay.
-- "stalled" flag combines staleness + dirtiness into a single attention signal.
+- Self-contained single file, stdlib only. No `gita add`, no YAML, no `mrconfig` — point it at a directory and go.
+- Looks at the mtime of *dirty* files, not just commit dates — so "I edited but never committed" counts as activity, and an old commit with fresh edits isn't mistaken for abandoned.
+- `stalled` combines staleness + dirtiness into a single attention signal that no other tool in this space names.
 
 ## License
 

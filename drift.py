@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field, asdict
 
 
+__version__ = "0.2"
+
 DEFAULT_ROOTS = [pathlib.Path.home()]
 
 
@@ -47,6 +49,8 @@ class Repo:
     dirty: int = 0
     last_commit_ts: float = 0.0
     last_working_change_ts: float = 0.0
+    has_commits: bool = True
+    detached: bool = False
     error: str = ""
 
     @property
@@ -104,9 +108,17 @@ def find_repos(root: pathlib.Path, max_depth: int = 3) -> list[pathlib.Path]:
 
 def inspect_repo(path: pathlib.Path) -> Repo:
     repo = Repo(path=path)
-    # Branch + upstream
-    branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], path).strip()
-    repo.branch = branch or "?"
+    # Branch. symbolic-ref disambiguates the three states that
+    # `rev-parse --abbrev-ref HEAD` collapses into the literal "HEAD":
+    #   - on a branch (even unborn): returns the branch name
+    #   - detached: fails, so we fall back to the short sha
+    branch = _run(["git", "symbolic-ref", "--short", "HEAD"], path).strip()
+    if branch:
+        repo.branch = branch
+    else:
+        sha = _run(["git", "rev-parse", "--short", "HEAD"], path).strip()
+        repo.detached = True
+        repo.branch = f"detached@{sha}" if sha else "?"
 
     upstream = _run(
         ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], path
@@ -128,37 +140,37 @@ def inspect_repo(path: pathlib.Path) -> Repo:
     porcelain = _run(["git", "status", "--porcelain"], path)
     repo.dirty = sum(1 for line in porcelain.splitlines() if line.strip())
 
-    # Last commit timestamp
+    # Last commit timestamp. Empty output => unborn branch (no commits yet).
     last = _run(["git", "log", "-1", "--format=%ct"], path).strip()
     if last.isdigit():
         repo.last_commit_ts = float(last)
+        repo.has_commits = True
+    else:
+        repo.has_commits = False
 
-    # Last working-tree touch (any file mtime, capped to a reasonable sample)
-    try:
-        repo.last_working_change_ts = _latest_working_mtime(path)
-    except OSError:
-        pass
+    # Last working-tree touch: newest mtime among files git considers dirty
+    # (modified-tracked + untracked-not-ignored). This is the "I edited but
+    # didn't commit" signal — and it's cheap because we only stat dirty files,
+    # not the whole tree.
+    repo.last_working_change_ts = _latest_dirty_mtime(path)
 
     return repo
 
 
-def _latest_working_mtime(repo_root: pathlib.Path, sample_cap: int = 2000) -> float:
-    """Walk repo, ignoring .git and common bulk dirs, returning the newest mtime seen."""
+def _latest_dirty_mtime(repo_root: pathlib.Path) -> float:
+    """Newest mtime among modified-tracked and untracked-not-ignored files."""
+    out = _run(
+        ["git", "ls-files", "-m", "-o", "--exclude-standard", "-z"], repo_root
+    )
     newest = 0.0
-    skip = {".git", "node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build", ".next"}
-    count = 0
-    for sub in repo_root.rglob("*"):
+    for rel in out.split("\0"):
+        if not rel:
+            continue
         try:
-            if any(part in skip for part in sub.parts):
-                continue
-            if sub.is_file():
-                count += 1
-                if count > sample_cap:
-                    return newest
-                m = sub.stat().st_mtime
-                if m > newest:
-                    newest = m
-        except (PermissionError, OSError):
+            m = (repo_root / rel).stat().st_mtime
+            if m > newest:
+                newest = m
+        except OSError:
             continue
     return newest
 
@@ -186,9 +198,14 @@ def _badge(repo: Repo, args: argparse.Namespace) -> str:
         tags.append(f"↑{repo.ahead}")
     if repo.behind > 0:
         tags.append(f"↓{repo.behind}")
-    if not repo.upstream:
+    if not repo.has_commits:
+        tags.append("no-commits")
+    elif not repo.upstream:
         tags.append("no-upstream")
-    if repo.last_commit_age_days >= args.stale_days and repo.dirty > 0:
+    # "stalled" = dirty work that hasn't been *touched* (committed or edited)
+    # in a while. Using last-touch rather than last-commit means a repo with
+    # old commits but recent edits is correctly seen as active, not abandoned.
+    if _is_stalled(repo, args):
         tags.append("stalled")
     return " ".join(tags)
 
@@ -237,9 +254,16 @@ def report(repos: list[Repo], args: argparse.Namespace) -> int:
     return _exit_code(repos, args)
 
 
+def _is_stalled(repo: Repo, args: argparse.Namespace) -> bool:
+    return repo.last_touch_age_days >= args.stale_days and repo.dirty > 0
+
+
 def _exit_code(repos: list[Repo], args: argparse.Namespace) -> int:
+    # Non-zero only when something actually needs attention: dirty work above
+    # the threshold, or stalled work. A clean repo that's merely old (a
+    # finished, shipped project) is not a problem and must not fail scripts.
     for r in repos:
-        if r.dirty >= args.dirty_warn or r.last_commit_age_days >= args.stale_days:
+        if r.dirty >= args.dirty_warn or _is_stalled(r, args):
             return 1
     return 0
 
@@ -252,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="drift",
         description="Surface git workspace decay across many projects.",
     )
+    p.add_argument("--version", action="version", version=f"drift {__version__}")
     p.add_argument(
         "roots",
         nargs="*",
@@ -260,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--max-depth", type=int, default=2)
     p.add_argument("--dirty-warn", type=int, default=1, help="Dirty file count that earns a D-flag (default 1).")
-    p.add_argument("--stale-days", type=float, default=14.0, help="Days-since-last-commit threshold for 'stalled' flag (default 14).")
+    p.add_argument("--stale-days", type=float, default=14.0, help="Days-since-last-touch (commit or edit) threshold for 'stalled' flag (default 14).")
     p.add_argument("--only-flagged", action="store_true", help="Hide repos with no flags (clean and current).")
     p.add_argument("--json", action="store_true")
     return p
