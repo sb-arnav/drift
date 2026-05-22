@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -238,6 +239,70 @@ class TestExitCode(unittest.TestCase):
                        last_commit_ts=now - 60 * 86400,
                        last_working_change_ts=now - 60 * 86400)
         self.assertEqual(drift._exit_code([r], self._Args()), 1)
+
+
+class TestSortKey(unittest.TestCase):
+    def _repos(self):
+        now = time.time()
+        a = drift.Repo(path=pathlib.Path("/tmp/alpha"), dirty=0,
+                       last_commit_ts=now - 1 * 86400)        # recent, clean
+        b = drift.Repo(path=pathlib.Path("/tmp/zeta"), dirty=5,
+                       last_commit_ts=now - 1 * 86400,
+                       last_working_change_ts=now - 1 * 86400)  # dirty, recent
+        c = drift.Repo(path=pathlib.Path("/tmp/mid"), dirty=1,
+                       last_commit_ts=now - 90 * 86400,
+                       last_working_change_ts=now - 90 * 86400)  # neglected
+        return [a, b, c]
+
+    def test_age_puts_most_neglected_first(self):
+        ordered = sorted(self._repos(), key=drift._sort_key("age"))
+        self.assertEqual(ordered[0].path.name, "mid")
+
+    def test_dirty_puts_most_dirty_first(self):
+        ordered = sorted(self._repos(), key=drift._sort_key("dirty"))
+        self.assertEqual(ordered[0].path.name, "zeta")
+
+    def test_name_is_alphabetical(self):
+        ordered = sorted(self._repos(), key=drift._sort_key("name"))
+        self.assertEqual([r.path.name for r in ordered], ["alpha", "mid", "zeta"])
+
+
+class TestColor(unittest.TestCase):
+    class _Args:
+        dirty_warn = 1
+        stale_days = 14
+        color = "auto"
+
+    def test_paint_off_returns_plain(self):
+        self.assertEqual(drift._paint("x", drift._C.RED, on=False), "x")
+
+    def test_paint_on_wraps(self):
+        out = drift._paint("x", drift._C.RED, on=True)
+        self.assertTrue(out.startswith(drift._C.RED))
+        self.assertTrue(out.endswith(drift._C.RESET))
+
+    def test_paint_empty_never_wrapped(self):
+        self.assertEqual(drift._paint("", drift._C.RED, on=True), "")
+
+    def test_color_always_and_never(self):
+        a = self._Args(); a.color = "always"
+        self.assertTrue(drift._want_color(a))
+        a.color = "never"
+        self.assertFalse(drift._want_color(a))
+
+    def test_no_color_env_disables_auto(self):
+        a = self._Args(); a.color = "auto"
+        with unittest.mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            self.assertFalse(drift._want_color(a))
+
+    def test_badge_plain_and_colored_agree_on_flags(self):
+        a = self._Args()
+        r = drift.Repo(path=pathlib.Path("/tmp/x"), dirty=3, upstream="origin/m", ahead=2)
+        plain = drift._badge(r, a)
+        colored = drift._badge_colored(r, a, on=True)
+        for tok in ("D3", "↑2"):
+            self.assertIn(tok, plain)
+            self.assertIn(tok, colored)  # token text survives the color wrapping
 
 
 if __name__ == "__main__":

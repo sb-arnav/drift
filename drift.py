@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -19,7 +20,7 @@ import time
 from dataclasses import dataclass, field, asdict
 
 
-__version__ = "0.2"
+__version__ = "0.3"
 
 DEFAULT_ROOTS = [pathlib.Path.home()]
 
@@ -190,27 +191,64 @@ def _age_str(days: float) -> str:
     return f"{days/365:.1f}y"
 
 
-def _badge(repo: Repo, args: argparse.Namespace) -> str:
-    tags = []
+class _C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+
+
+def _paint(text: str, code: str, on: bool) -> str:
+    return f"{code}{text}{_C.RESET}" if on and text else text
+
+
+def _want_color(args: argparse.Namespace) -> bool:
+    if args.color == "always":
+        return True
+    if args.color == "never":
+        return False
+    # auto: honor the NO_COLOR convention, otherwise color only a real TTY
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    return sys.stdout.isatty()
+
+
+def _flag_tokens(repo: Repo, args: argparse.Namespace) -> list[tuple[str, str]]:
+    """(text, color) for each flag. Single source of truth for plain + colored."""
+    toks: list[tuple[str, str]] = []
     if repo.dirty >= args.dirty_warn:
-        tags.append(f"D{repo.dirty}")
+        toks.append((f"D{repo.dirty}", _C.YELLOW))
     if repo.ahead > 0:
-        tags.append(f"↑{repo.ahead}")
+        toks.append((f"↑{repo.ahead}", _C.CYAN))
     if repo.behind > 0:
-        tags.append(f"↓{repo.behind}")
+        toks.append((f"↓{repo.behind}", _C.CYAN))
     if not repo.has_commits:
-        tags.append("no-commits")
+        toks.append(("no-commits", _C.MAGENTA))
     elif not repo.upstream:
-        tags.append("no-upstream")
+        toks.append(("no-upstream", _C.DIM))
     # "stalled" = dirty work that hasn't been *touched* (committed or edited)
     # in a while. Using last-touch rather than last-commit means a repo with
     # old commits but recent edits is correctly seen as active, not abandoned.
     if _is_stalled(repo, args):
-        tags.append("stalled")
-    return " ".join(tags)
+        toks.append(("stalled", _C.BOLD + _C.RED))
+    return toks
+
+
+def _badge(repo: Repo, args: argparse.Namespace) -> str:
+    return " ".join(text for text, _ in _flag_tokens(repo, args))
+
+
+def _badge_colored(repo: Repo, args: argparse.Namespace, on: bool) -> str:
+    return " ".join(_paint(text, code, on) for text, code in _flag_tokens(repo, args))
 
 
 def report(repos: list[Repo], args: argparse.Namespace) -> int:
+    repos = sorted(repos, key=_sort_key(args.sort))
+
     if args.json:
         out = []
         for r in repos:
@@ -223,35 +261,44 @@ def report(repos: list[Repo], args: argparse.Namespace) -> int:
         print()
         return _exit_code(repos, args)
 
-    # Sort by signal: dirty first, then ahead/behind, then commit-age
-    def signal_key(r: Repo) -> tuple:
-        return (
-            -r.dirty,
-            -(r.ahead + r.behind),
-            -r.last_commit_age_days,
-        )
-
-    repos = sorted(repos, key=signal_key)
+    on = _want_color(args)
 
     print(f"drift · {len(repos)} repos")
     print()
-    print(f"  {'repo':<30} {'branch':<22} {'dirty':>5} {'ahead/behind':>14} {'last commit':>12}  flags")
-    print(f"  {'-'*30} {'-'*22} {'-'*5} {'-'*14} {'-'*12}  {'-'*16}")
-    flagged = 0
+    header = f"  {'repo':<30} {'branch':<22} {'dirty':>5} {'ahead/behind':>14} {'last commit':>12}  flags"
+    sep = f"  {'-'*30} {'-'*22} {'-'*5} {'-'*14} {'-'*12}  {'-'*16}"
+    print(_paint(header, _C.BOLD, on))
+    print(_paint(sep, _C.DIM, on))
     for r in repos:
-        if args.only_flagged and not _badge(r, args):
+        tokens = _flag_tokens(r, args)
+        if args.only_flagged and not tokens:
             continue
-        flagged += 1 if _badge(r, args) else 0
         name = r.path.name[:30]
         branch = (r.branch or "?")[:22]
         ahead_behind = f"{r.ahead}/{r.behind}" if r.upstream else "—"
-        print(
+        line = (
             f"  {name:<30} {branch:<22} {r.dirty:>5} {ahead_behind:>14} "
-            f"{_age_str(r.last_commit_age_days):>12}  {_badge(r, args)}"
+            f"{_age_str(r.last_commit_age_days):>12}  {_badge_colored(r, args, on)}"
         )
+        # Clean, current repos recede so the ones needing attention pop.
+        if on and not tokens:
+            line = _paint(line, _C.DIM, on)
+        print(line)
 
     print()
     return _exit_code(repos, args)
+
+
+def _sort_key(mode: str):
+    """Row ordering. 'signal' = most actionable first; 'age' = most neglected first."""
+    if mode == "age":
+        return lambda r: -r.last_touch_age_days
+    if mode == "dirty":
+        return lambda r: (-r.dirty, -r.last_touch_age_days)
+    if mode == "name":
+        return lambda r: r.path.name.lower()
+    # signal (default): dirty, then divergence, then oldest commit
+    return lambda r: (-r.dirty, -(r.ahead + r.behind), -r.last_commit_age_days)
 
 
 def _is_stalled(repo: Repo, args: argparse.Namespace) -> bool:
@@ -287,6 +334,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dirty-warn", type=int, default=1, help="Dirty file count that earns a D-flag (default 1).")
     p.add_argument("--stale-days", type=float, default=14.0, help="Days-since-last-touch (commit or edit) threshold for 'stalled' flag (default 14).")
     p.add_argument("--only-flagged", action="store_true", help="Hide repos with no flags (clean and current).")
+    p.add_argument(
+        "--sort",
+        choices=["signal", "age", "dirty", "name"],
+        default="signal",
+        help="Row order: signal (default, most actionable), age (most neglected first), dirty, name.",
+    )
+    p.add_argument(
+        "--color",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help="Colorize output (default auto: on for a TTY unless NO_COLOR is set).",
+    )
     p.add_argument("--json", action="store_true")
     return p
 
