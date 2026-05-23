@@ -11,6 +11,7 @@ Stdlib only. No mutation. Reads `git` via subprocess.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import pathlib
@@ -20,7 +21,7 @@ import time
 from dataclasses import dataclass, field, asdict
 
 
-__version__ = "0.3"
+__version__ = "0.4"
 
 DEFAULT_ROOTS = [pathlib.Path.home()]
 
@@ -347,6 +348,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Colorize output (default auto: on for a TTY unless NO_COLOR is set).",
     )
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--exclude",
+        metavar="PATTERN",
+        action="append",
+        default=[],
+        help="Skip repos whose directory name matches PATTERN (glob, can repeat). E.g. --exclude 'backup-*'.",
+    )
     return p
 
 
@@ -365,6 +373,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         seen.add(rp)
         deduped.append(r)
+
+    # Apply --exclude filters (glob match against repo directory name)
+    if args.exclude:
+        deduped = [
+            r for r in deduped
+            if not any(fnmatch.fnmatch(r.name, pat) for pat in args.exclude)
+        ]
 
     inspected = [inspect_repo(r) for r in deduped]
     return report(inspected, args)

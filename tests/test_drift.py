@@ -305,5 +305,35 @@ class TestColor(unittest.TestCase):
             self.assertIn(tok, colored)  # token text survives the color wrapping
 
 
+class TestExclude(unittest.TestCase):
+    def test_exclude_by_exact_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "keep").mkdir()
+            _init_repo(root / "keep")
+            (root / "backup-old").mkdir()
+            _init_repo(root / "backup-old")
+            found = drift.find_repos(root, max_depth=1)
+            self.assertEqual({p.name for p in found}, {"keep", "backup-old"})
+            # simulate --exclude 'backup-*'
+            import fnmatch
+            filtered = [r for r in found if not fnmatch.fnmatch(r.name, "backup-*")]
+            self.assertEqual([p.name for p in filtered], ["keep"])
+
+    def test_exclude_via_main_argv(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "active").mkdir()
+            _init_repo(root / "active")
+            (root / "archive-2024").mkdir()
+            _init_repo(root / "archive-2024")
+            import io
+            with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+                drift.main([str(root), "--max-depth", "1", "--exclude", "archive-*"])
+                out = mock_out.getvalue()
+            self.assertIn("active", out)
+            self.assertNotIn("archive-2024", out)
+
+
 if __name__ == "__main__":
     unittest.main()

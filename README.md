@@ -34,13 +34,15 @@ A detached HEAD shows as `detached@<sha>` in the branch column.
 ## Use
 
 ```bash
-drift                            # scan $HOME up to depth 2
-drift ~/work ~/personal          # scan multiple roots
-drift --only-flagged             # hide clean repos
-drift --sort age                 # most-neglected repo first
-drift --max-depth 3              # deeper walk
-drift --stale-days 7             # tighter stall threshold
-drift --json | jq                # machine-readable
+drift                                   # scan $HOME up to depth 2
+drift ~/work ~/personal                 # scan multiple roots
+drift --only-flagged                    # hide clean repos
+drift --sort age                        # most-neglected repo first
+drift --max-depth 3                     # deeper walk
+drift --stale-days 7                    # tighter stall threshold
+drift --exclude 'backup-*'             # skip repos matching a glob
+drift --exclude 'archive-*' --exclude '*.bak'  # multiple exclusions
+drift --json | jq                       # machine-readable
 watch -ct drift --color always --only-flagged   # live dashboard, like top for repos
 ```
 
